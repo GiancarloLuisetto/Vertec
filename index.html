@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b0f14">
+<title>Arcus Vertec</title>
+<style>
+  :root {
+    --bg: #0b0f14; --card: #141a22; --line: #232c38; --txt: #e8edf3; --muted: #8a97a8;
+    --green: #2ecc71; --red: #e5484d; --orange: #f5a524; --blue: #3b82f6; --yellow: #ffd60a;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; background: var(--bg); color: var(--txt);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  body { min-height: 100vh; min-height: 100dvh; max-width: 480px; margin: 0 auto;
+    padding: max(16px, env(safe-area-inset-top)) 16px max(16px, env(safe-area-inset-bottom));
+    display: flex; flex-direction: column; gap: 14px; }
+  header { display: flex; justify-content: space-between; align-items: center; }
+  h1 { font-size: 18px; letter-spacing: .12em; margin: 0; }
+  .pill { font-size: 13px; padding: 5px 10px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
+  .pill.on { color: var(--green); border-color: var(--green); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 18px; }
+  .label { text-align: center; font-size: 12px; letter-spacing: .12em; color: var(--muted); }
+  #risultato { font-size: 64px; font-weight: 700; color: var(--yellow); text-align: center; line-height: 1.15;
+    font-variant-numeric: tabular-nums; }
+  #risultato small { font-size: 24px; color: var(--muted); font-weight: 500; }
+  #stato { text-align: center; margin-top: 8px; font-size: 18px; font-weight: 600; color: var(--muted); }
+  #stato.pronto { color: var(--green); }
+  #stato.pausa { color: var(--red); }
+  #stato.calib { color: var(--orange); }
+  #info { text-align: center; color: var(--muted); font-size: 13px; margin-top: 6px; min-height: 1.3em; }
+  .btns { display: grid; gap: 10px; }
+  button { font: inherit; font-size: 20px; font-weight: 700; letter-spacing: .06em; border: 0; border-radius: 14px;
+    padding: 18px; color: #0b0f14; cursor: pointer; }
+  button:active { transform: scale(.98); filter: brightness(.9); }
+  button:disabled { opacity: .35; cursor: default; transform: none; filter: none; }
+  #bConnetti { background: var(--blue); color: #fff; }
+  #bStart { background: var(--green); }
+  #bReset { background: var(--red); color: #fff; }
+  #bCalibra { background: var(--orange); }
+  h2 { font-size: 12px; color: var(--muted); letter-spacing: .12em; margin: 0 0 8px; font-weight: 600; }
+  ol { list-style: none; margin: 0; padding: 0; }
+  li { display: flex; justify-content: space-between; padding: 8px 0; border-top: 1px solid var(--line);
+    font-variant-numeric: tabular-nums; }
+  li:first-child { border-top: 0; }
+  li span:last-child { color: var(--muted); }
+  .vuoto { color: var(--muted); font-size: 14px; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>ARCUS VERTEC</h1>
+    <span id="conn" class="pill">Non connesso</span>
+  </header>
+
+  <button id="bConnetti">CONNETTI</button>
+
+  <section class="card">
+    <div class="label">QUOTA MASSIMA</div>
+    <div id="risultato">&mdash; <small>cm</small></div>
+    <div id="stato">Non connesso</div>
+    <div id="info"></div>
+  </section>
+
+  <div class="btns">
+    <button id="bStart" disabled>START</button>
+    <button id="bReset" disabled>RESET</button>
+    <button id="bCalibra" disabled>CALIBRA</button>
+  </div>
+
+  <section class="card">
+    <h2>ULTIMI SALTI</h2>
+    <ol id="storico"><li class="vuoto">Nessuna misura ancora</li></ol>
+  </section>
+
+<script>
+  // Profilo Nordic UART Service (UUID in minuscolo, come richiede il Web Bluetooth)
+  const SERVICE = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+  const RX_UUID = '6e400002-b5a3-f393-e0a9-e50e24dcca9e'; // telefono -> ESP32 (scrittura)
+  const TX_UUID = '6e400003-b5a3-f393-e0a9-e50e24dcca9e'; // ESP32 -> telefono (notifiche)
+
+  const el = id => document.getElementById(id);
+  const bConnetti = el('bConnetti'), bStart = el('bStart'), bReset = el('bReset'), bCalibra = el('bCalibra');
+  const enc = new TextEncoder(), dec = new TextDecoder();
+
+  let dispositivo = null, rx = null, tx = null, connesso = false, wakeLock = null;
+  let altezzaCm = null;
+  const storico = [];
+
+  const attesa = ms => new Promise(r => setTimeout(r, ms));
+
+  function mostraStato(testo, classe) {
+    const s = el('stato');
+    s.textContent = testo;
+    s.className = classe || '';
+  }
+  function mostraInfo(testo) {
+    el('info').textContent = testo || '';
+  }
+  function impostaConnesso(si) {
+    connesso = si;
+    const pill = el('conn');
+    pill.textContent = si ? 'Connesso' : 'Non connesso';
+    pill.className = 'pill' + (si ? ' on' : '');
+    bStart.disabled = bReset.disabled = bCalibra.disabled = !si;
+    bConnetti.hidden = si;
+    bConnetti.textContent = dispositivo ? 'RICONNETTI' : 'CONNETTI';
+    if (!si) mostraStato('Non connesso');
+  }
+
+  function aggiungiStorico(valore) {
+    storico.unshift({ valore, ora: new Date().toLocaleTimeString('it-IT') });
+    if (storico.length > 10) storico.pop();
+    el('storico').innerHTML = storico
+      .map(r => '<li><span>' + r.valore + ' cm</span><span>' + r.ora + '</span></li>')
+      .join('');
+  }
+
+  function aggiornaInfoAltezza(prefisso) {
+    mostraInfo((prefisso ? prefisso + ' ' : '') + (altezzaCm !== null ? 'Altezza sensore: ' + altezzaCm + ' cm' : ''));
+  }
+
+  // Messaggi inviati dall'ESP32 (vedi protocollo nello sketch)
+  function onNotifica(ev) {
+    const t = dec.decode(ev.target.value).trim();
+    if (t === 'S:PRONTO')       { mostraStato('Pronto', 'pronto'); aggiornaInfoAltezza(); }
+    else if (t === 'S:PAUSA')   { mostraStato('In pausa', 'pausa'); aggiornaInfoAltezza(); }
+    else if (t === 'S:CALIB')   { mostraStato('Calibrazione in corso…', 'calib'); mostraInfo('Tieni libera l\'area sotto il sensore'); }
+    else if (t === 'S:ATTESA')  { mostraStato('In attesa di calibrazione', 'calib'); mostraInfo('Premi CALIBRA'); }
+    else if (t.startsWith('R:')) {
+      const v = t.slice(2);
+      el('risultato').innerHTML = v + ' <small>cm</small>';
+      mostraStato('Misura completata', '');
+      mostraInfo('Premi START per una nuova misura');
+      aggiungiStorico(v);
+    }
+    else if (t.startsWith('H:')) { altezzaCm = t.slice(2); aggiornaInfoAltezza(); }
+    else if (t === 'C:OK')       { mostraInfo('Taratura riuscita'); }
+    else if (t.startsWith('C:KO:')) {
+      const motivi = { LETTURE: 'letture insufficienti', RANGE: 'altezza fuori range', INSTABILE: 'letture instabili, area libera?' };
+      mostraInfo('Taratura fallita: ' + (motivi[t.slice(5)] || t.slice(5)));
+    }
+  }
+
+  async function collega(dev) {
+    const server = await dev.gatt.connect();
+    const servizio = await server.getPrimaryService(SERVICE);
+    rx = await servizio.getCharacteristic(RX_UUID);
+    tx = await servizio.getCharacteristic(TX_UUID);
+    tx.addEventListener('characteristicvaluechanged', onNotifica);
+    await tx.startNotifications();
+    impostaConnesso(true);
+    mostraStato('Connesso');
+    schermoAcceso();
+    await invia('STATO'); // chiede lo stato attuale allo strumento
+  }
+
+  async function connetti() {
+    if (!navigator.bluetooth) {
+      mostraStato('Web Bluetooth non disponibile');
+      mostraInfo('Apri questa pagina con il browser Bluefy');
+      return;
+    }
+    try {
+      mostraStato('Ricerca dello strumento…');
+      if (!dispositivo) {
+        dispositivo = await navigator.bluetooth.requestDevice({ filters: [{ services: [SERVICE] }] });
+        dispositivo.addEventListener('gattserverdisconnected', onDisconnesso);
+      }
+      await collega(dispositivo);
+    } catch (e) {
+      impostaConnesso(false);
+      mostraInfo('Connessione non riuscita: ' + (e && e.message ? e.message : e));
+    }
+  }
+
+  async function onDisconnesso() {
+    impostaConnesso(false);
+    // Fino a 3 tentativi automatici di riconnessione
+    for (let i = 0; i < 3 && !connesso; i++) {
+      mostraInfo('Riconnessione… (' + (i + 1) + '/3)');
+      await attesa(1500);
+      try { await collega(dispositivo); return; } catch (e) { /* riprova */ }
+    }
+    mostraInfo('Disconnesso. Premi RICONNETTI');
+  }
+
+  async function invia(comando) {
+    if (!rx || !connesso) return;
+    try {
+      await rx.writeValue(enc.encode(comando));
+    } catch (e) {
+      mostraInfo('Invio non riuscito: ' + (e && e.message ? e.message : e));
+    }
+  }
+
+  // Tiene lo schermo acceso per non perdere la connessione durante l'uso
+  async function schermoAcceso() {
+    try {
+      if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen');
+    } catch (e) { /* non supportato: nessun problema */ }
+  }
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && connesso) schermoAcceso();
+  });
+
+  bConnetti.addEventListener('click', connetti);
+  bStart.addEventListener('click', () => invia('START'));
+  bReset.addEventListener('click', () => invia('RESET'));
+  bCalibra.addEventListener('click', () => invia('CALIBRA'));
+
+  impostaConnesso(false);
+  if (!navigator.bluetooth) {
+    mostraStato('Web Bluetooth non disponibile');
+    mostraInfo('Apri questa pagina con il browser Bluefy');
+  }
+</script>
+</body>
+</html>
