@@ -46,6 +46,11 @@
   li:first-child { border-top: 0; }
   li span:last-child { color: var(--muted); }
   .vuoto { color: var(--muted); font-size: 14px; }
+  .riga2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 12px; }
+  .riga2 button { font-size: 15px; padding: 14px; background: var(--blue); color: #fff; }
+  #bSvuota { grid-column: 1 / -1; background: transparent; color: var(--muted); border: 1px solid var(--line); font-size: 14px; padding: 10px; }
+  #trajInfo { color: var(--muted); font-size: 14px; }
+  #trajMsg { color: var(--muted); font-size: 13px; margin-top: 8px; min-height: 1.2em; }
 </style>
 </head>
 <body>
@@ -70,6 +75,17 @@
   </div>
 
   <section class="card">
+    <h2>TRAIETTORIE (PER EXCEL)</h2>
+    <div id="trajInfo">Nessuna traiettoria ricevuta</div>
+    <div class="riga2">
+      <button id="bCopia" disabled>COPIA CSV</button>
+      <button id="bScarica" disabled>SCARICA CSV</button>
+      <button id="bSvuota" disabled>Svuota traiettorie</button>
+    </div>
+    <div id="trajMsg"></div>
+  </section>
+
+  <section class="card">
     <h2>ULTIMI SALTI</h2>
     <ol id="storico"><li class="vuoto">Nessuna misura ancora</li></ol>
   </section>
@@ -87,6 +103,11 @@
   let dispositivo = null, rx = null, tx = null, connesso = false, wakeLock = null;
   let altezzaCm = null;
   const storico = [];
+
+  // Traiettorie ricevute (restano in memoria finche' la pagina resta aperta)
+  const salti = [];          // { n, ora, esito, H, righe: [{i, t, y, zona}], completo }
+  let traiettoria = null;    // traiettoria in corso di ricezione
+  let contatoreSalti = 0;
 
   const attesa = ms => new Promise(r => setTimeout(r, ms));
 
@@ -121,6 +142,76 @@
     mostraInfo((prefisso ? prefisso + ' ' : '') + (altezzaCm !== null ? 'Altezza sensore: ' + altezzaCm + ' cm' : ''));
   }
 
+  // --- TRAIETTORIE E CSV ---
+  // CSV con ";" e virgola decimale: si apre in Excel (impostazioni italiane) senza conversioni
+  const virgola = (v, d) => v.toFixed(d).replace('.', ',');
+  function costruisciCsv() {
+    const righe = ['salto;ora;esito;campione;t_ms;distanza_mm;zona;H_cm;quota_cm'];
+    for (const s of salti) {
+      for (const r of s.righe) {
+        const H = s.H !== null ? Number(s.H) : null;
+        const quota = H !== null ? virgola((H * 10 - r.y) / 10, 1) : '';
+        righe.push([s.n, s.ora, s.esito, r.i, r.t, r.y, r.zona, H !== null ? virgola(H, 1) : '', quota].join(';'));
+      }
+    }
+    return righe.join('\r\n') + '\r\n';
+  }
+  function aggiornaTraiettorie() {
+    const campioni = salti.reduce((a, s) => a + s.righe.length, 0);
+    el('trajInfo').textContent = salti.length
+      ? salti.length + (salti.length === 1 ? ' salto' : ' salti') + ', ' + campioni + ' campioni totali'
+      : 'Nessuna traiettoria ricevuta';
+    const vuoto = salti.length === 0;
+    el('bCopia').disabled = el('bScarica').disabled = el('bSvuota').disabled = vuoto;
+  }
+  function messaggioTraj(t) { el('trajMsg').textContent = t || ''; }
+
+  function gestisciTraiettoria(t) {
+    const p = t.slice(2).split(',');
+    if (p[0] === 'INIZIO') {
+      contatoreSalti++;
+      traiettoria = { n: contatoreSalti, ora: new Date().toLocaleTimeString('it-IT'), esito: p[2] || '',
+                      H: altezzaCm, attesi: parseInt(p[1], 10) || 0, righe: [] };
+    } else if (p[0] === 'FINE') {
+      if (!traiettoria) return;
+      if (traiettoria.righe.length !== traiettoria.attesi) traiettoria.esito += '*INCOMPLETO';
+      salti.push(traiettoria);
+      traiettoria = null;
+      aggiornaTraiettorie();
+      messaggioTraj('Salto ' + salti[salti.length - 1].n + ' salvato');
+    } else if (traiettoria) {
+      traiettoria.righe.push({ i: +p[0], t: +p[1], y: +p[2], zona: +p[3] });
+    }
+  }
+
+  async function copiaCsv() {
+    const csv = costruisciCsv();
+    try {
+      await navigator.clipboard.writeText(csv);
+      messaggioTraj('Copiato. Incolla in Excel (cella A1).');
+    } catch (e) {
+      // Se gli appunti non sono disponibili, mostra il testo da selezionare
+      window.prompt('Copia questo testo (tieni premuto, Seleziona tutto):', csv);
+    }
+  }
+  async function scaricaCsv() {
+    const csv = costruisciCsv();
+    const nome = 'vertec_' + new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '') + '.csv';
+    try {
+      const file = new File([csv], nome, { type: 'text/csv' });
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share({ files: [file], title: nome }); // foglio di condivisione di iOS
+        messaggioTraj('File pronto: ' + nome);
+        return;
+      }
+    } catch (e) { if (e && e.name === 'AbortError') return; }
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+    a.download = nome;
+    document.body.appendChild(a); a.click(); a.remove();
+    messaggioTraj('Download avviato: ' + nome);
+  }
+
   // Messaggi inviati dall'ESP32 (vedi protocollo nello sketch)
   function onNotifica(ev) {
     const t = dec.decode(ev.target.value).trim();
@@ -128,6 +219,7 @@
     else if (t === 'S:PAUSA')   { mostraStato('In pausa', 'pausa'); aggiornaInfoAltezza(); }
     else if (t === 'S:CALIB')   { mostraStato('Calibrazione in corso…', 'calib'); mostraInfo('Tieni libera l\'area sotto il sensore'); }
     else if (t === 'S:ATTESA')  { mostraStato('In attesa di calibrazione', 'calib'); mostraInfo('Premi CALIBRA'); }
+    else if (t.startsWith('T:')) { gestisciTraiettoria(t); }
     else if (t.startsWith('R:')) {
       const v = t.slice(2);
       el('risultato').innerHTML = v + ' <small>cm</small>';
@@ -209,8 +301,14 @@
   bStart.addEventListener('click', () => invia('START'));
   bReset.addEventListener('click', () => invia('RESET'));
   bCalibra.addEventListener('click', () => invia('CALIBRA'));
+  el('bCopia').addEventListener('click', copiaCsv);
+  el('bScarica').addEventListener('click', scaricaCsv);
+  el('bSvuota').addEventListener('click', () => {
+    if (confirm('Cancellare tutte le traiettorie salvate nella pagina?')) { salti.length = 0; aggiornaTraiettorie(); messaggioTraj(''); }
+  });
 
   impostaConnesso(false);
+  aggiornaTraiettorie();
   if (!navigator.bluetooth) {
     mostraStato('Web Bluetooth non disponibile');
     mostraInfo('Apri questa pagina con il browser Bluefy');
