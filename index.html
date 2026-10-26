@@ -146,12 +146,15 @@
   // CSV con ";" e virgola decimale: si apre in Excel (impostazioni italiane) senza conversioni
   const virgola = (v, d) => v.toFixed(d).replace('.', ',');
   function costruisciCsv() {
-    const righe = ['salto;ora;esito;campione;t_ms;distanza_mm;zona;H_cm;quota_cm'];
+    const righe = ['salto;ora;esito;campione;t_ms;distanza_mm;zona;H_cm;quota_cm;usato_fit;vertice_fit_mm;quota_fit_cm'];
     for (const s of salti) {
       for (const r of s.righe) {
         const H = s.H !== null ? Number(s.H) : null;
         const quota = H !== null ? virgola((H * 10 - r.y) / 10, 1) : '';
-        righe.push([s.n, s.ora, s.esito, r.i, r.t, r.y, r.zona, H !== null ? virgola(H, 1) : '', quota].join(';'));
+        const usato = s.fit ? (s.escluse.has(r.i) ? 0 : 1) : '';
+        const vertice = s.fit ? virgola(s.fit.vertice, 1) : '';
+        const quotaFit = (s.fit && H !== null) ? virgola((H * 10 - s.fit.vertice) / 10, 1) : '';
+        righe.push([s.n, s.ora, s.esito, r.i, r.t, r.y, r.zona, H !== null ? virgola(H, 1) : '', quota, usato, vertice, quotaFit].join(';'));
       }
     }
     return righe.join('\r\n') + '\r\n';
@@ -171,7 +174,7 @@
     if (p[0] === 'INIZIO') {
       contatoreSalti++;
       traiettoria = { n: contatoreSalti, ora: new Date().toLocaleTimeString('it-IT'), esito: p[2] || '',
-                      H: altezzaCm, attesi: parseInt(p[1], 10) || 0, righe: [] };
+                      H: altezzaCm, attesi: parseInt(p[1], 10) || 0, righe: [], escluse: new Set(), fit: null };
     } else if (p[0] === 'FINE') {
       if (!traiettoria) return;
       if (traiettoria.righe.length !== traiettoria.attesi) traiettoria.esito += '*INCOMPLETO';
@@ -181,6 +184,17 @@
       messaggioTraj('Salto ' + salti[salti.length - 1].n + ' salvato');
     } else if (traiettoria) {
       traiettoria.righe.push({ i: +p[0], t: +p[1], y: +p[2], zona: +p[3] });
+    }
+  }
+
+  // Risultato del fit parabolico: X:<i> = campione escluso, F:<vertice mm>,<usati>/<totali>
+  function gestisciFit(t) {
+    if (!traiettoria) return;
+    if (t.startsWith('X:')) traiettoria.escluse.add(parseInt(t.slice(2), 10));
+    else {
+      const p = t.slice(2).split(',');
+      const u = (p[1] || '').split('/');
+      traiettoria.fit = { vertice: parseFloat(p[0]), usati: parseInt(u[0], 10), totali: parseInt(u[1], 10) };
     }
   }
 
@@ -220,6 +234,7 @@
     else if (t === 'S:CALIB')   { mostraStato('Calibrazione in corso…', 'calib'); mostraInfo('Tieni libera l\'area sotto il sensore'); }
     else if (t === 'S:ATTESA')  { mostraStato('In attesa di calibrazione', 'calib'); mostraInfo('Premi CALIBRA'); }
     else if (t.startsWith('T:')) { gestisciTraiettoria(t); }
+    else if (t.startsWith('X:') || t.startsWith('F:')) { gestisciFit(t); }
     else if (t.startsWith('R:')) {
       const v = t.slice(2);
       el('risultato').innerHTML = v + ' <small>cm</small>';
