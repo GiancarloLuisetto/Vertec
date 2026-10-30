@@ -69,6 +69,13 @@
   #bSvuota { grid-column: 1 / -1; background: transparent; color: var(--muted); border: 1px solid var(--line); font-size: 14px; padding: 10px; }
   #trajInfo { color: var(--muted); font-size: 14px; }
   #trajMsg { color: var(--muted); font-size: 13px; margin-top: 8px; min-height: 1.2em; }
+  #grezziInfo, #grezziNota { color: var(--muted); font-size: 14px; }
+  #grezziNota { font-size: 12px; line-height: 1.4; margin-top: 10px; }
+  #grezziProg { color: var(--muted); font-size: 13px; margin-top: 8px; min-height: 1.2em; }
+  #grezziN { width: 100%; font: inherit; font-size: 18px; padding: 10px; border-radius: 10px; border: 1px solid var(--line);
+    background: var(--bg); color: var(--txt); margin-top: 10px; }
+  .riga2 button.sec { background: transparent; color: var(--muted); border: 1px solid var(--line); font-size: 14px; padding: 10px; }
+  .riga2 .largo { grid-column: 1 / -1; }
 </style>
 </head>
 <body>
@@ -121,6 +128,24 @@
     <div id="trajMsg"></div>
   </section>
 
+  <section class="card" id="cardGrezzi">
+    <h2>DATI GREZZI (DIAGNOSTICA)</h2>
+    <div id="grezziInfo">Non connesso</div>
+    <input id="grezziN" type="number" inputmode="numeric" min="0" step="1" placeholder="Registrazione n. (vuoto o 0 = tutte)">
+    <div class="riga2">
+      <button id="bGrezziTutto" class="largo" disabled>SCARICA DAL DISPOSITIVO</button>
+      <button id="bGrezziLeggero" class="sec" disabled>Solo distanze e stati (pi&ugrave; veloce)</button>
+      <button id="bGrezziAnnulla" class="sec" disabled>Annulla</button>
+      <button id="bGrezziCopia" disabled>COPIA CSV</button>
+      <button id="bGrezziCsv" disabled>SCARICA CSV</button>
+      <button id="bGrezziCancella" class="sec" disabled>Cancella dal dispositivo</button>
+      <button id="bGrezziSvuota" class="sec" disabled>Svuota dati sul telefono</button>
+    </div>
+    <div id="grezziProg"></div>
+    <div id="grezziNota">Ogni salto (e ogni passaggio di una mano) viene registrato con tutte le 64 zone di tutti i frame, anche quelli in cui la mano non &egrave; stata letta.
+      Le registrazioni restano nella memoria dello strumento fino allo spegnimento. Durante lo scarico la misura &egrave; ferma.</div>
+  </section>
+
   <section class="card">
     <h2>ULTIMI SALTI</h2>
     <ol id="storico"><li class="vuoto">Nessuna misura ancora</li></ol>
@@ -164,6 +189,8 @@
     bStart.disabled = bReset.disabled = bCalibra.disabled = bLivella.disabled = !si;
     if (!si && inLivella) impostaLivella(false);
     bConnetti.hidden = si;
+    if (!si) grezzi.rx = null;
+    aggiornaGrezzi();
     bConnetti.textContent = dispositivo ? 'RICONNETTI' : 'CONNETTI';
     if (!si) mostraStato('Non connesso');
   }
@@ -315,6 +342,175 @@
     messaggioTraj('Download avviato: ' + nome);
   }
 
+
+  // --- DATI GREZZI ---
+  // Messaggi: G:<n registrazioni sul dispositivo>
+  //   D:INI,<registrazioni>,<byte per frame>,<soglia mm> | D:S,<id>,<n frame>,<salto Vertec>,<esito>
+  //   D:F,<frame>,<t_ms> | d<seq>:<12 byte in base64> | D:E,<frame>,<somma> | D:FINE | D:ANN
+  const grezzi = { sulDisp: null, sessioni: [], rx: null, soglia: 1000 };
+  const ESITI = { O: 'OK', S: 'SCARTO', B: 'BREVE', E: 'ERR', '-': '' };
+
+  function messaggioGrezzi(t) { el('grezziProg').textContent = t || ''; }
+  function aggiornaGrezzi() {
+    const frame = grezzi.sessioni.reduce((a, s) => a + s.frames.filter(f => f.ok).length, 0);
+    const sul = grezzi.sulDisp === null ? 'non letto' : String(grezzi.sulDisp);
+    el('grezziInfo').textContent = connesso
+      ? 'Sul dispositivo: ' + sul + ' registrazioni · scaricate sul telefono: ' + grezzi.sessioni.length + ' (' + frame + ' frame)'
+      : 'Non connesso · scaricate sul telefono: ' + grezzi.sessioni.length + ' (' + frame + ' frame)';
+    const scarica = grezzi.rx !== null;
+    el('bGrezziTutto').disabled = el('bGrezziLeggero').disabled = !connesso || scarica || !grezzi.sulDisp;
+    el('bGrezziAnnulla').disabled = !connesso || !scarica;
+    el('bGrezziCancella').disabled = !connesso || scarica || !grezzi.sulDisp;
+    el('bGrezziCopia').disabled = el('bGrezziCsv').disabled = el('bGrezziSvuota').disabled = frame === 0;
+  }
+
+  function decodificaFrame(buf, byteFrame) {
+    const v = new DataView(buf.buffer);
+    const f = { dist: [], stato: [], nb: [], rifl: [], sigma: [], segnale: [] };
+    for (let z = 0; z < 64; z++) {
+      f.dist.push(v.getInt16(2 * z, true));
+      f.stato.push(buf[128 + z]);
+      if (byteFrame > 192) {
+        f.nb.push(buf[192 + z]);
+        f.rifl.push(buf[256 + z]);
+        f.sigma.push(v.getUint16(320 + 2 * z, true));
+        f.segnale.push(v.getUint16(448 + 2 * z, true));
+      }
+    }
+    return f;
+  }
+
+  function chiudiRicezioneGrezzi(testo) {
+    const r = grezzi.rx;
+    grezzi.rx = null;
+    if (!r) return;
+    for (const s of r.nuove) {
+      const i = grezzi.sessioni.findIndex(x => x.id === s.id);
+      if (i >= 0) grezzi.sessioni[i] = s; else grezzi.sessioni.push(s);
+    }
+    const tot = r.nuove.reduce((a, s) => a + s.frames.length, 0);
+    const bad = r.nuove.reduce((a, s) => a + s.frames.filter(f => !f.ok).length + Math.max(0, s.nFrame - s.frames.length), 0);
+    messaggioGrezzi(testo + ' ' + r.nuove.length + ' registrazioni, ' + tot + ' frame' + (bad ? ', ' + bad + ' frame mancanti o con errori (non inclusi nel CSV)' : ', nessun errore') + '.');
+    aggiornaGrezzi();
+  }
+
+  function gestisciGrezzi(t) {
+    if (grezzi.rx && !grezzi.rx.inAttesa) grezzi.rx.ultimo = Date.now();
+    if (t.startsWith('G:')) {
+      grezzi.sulDisp = parseInt(t.slice(2), 10);
+      aggiornaGrezzi();
+      return;
+    }
+    if (t[0] === 'd') {   // blocco di 12 byte del frame in corso
+      const r = grezzi.rx;
+      if (!r || !r.fr) return;
+      const seq = parseInt(t.slice(1, 3), 10);
+      if (!(seq >= 0 && seq < r.fr.visti.length) || r.fr.visti[seq]) return;
+      try {
+        const b = atob(t.slice(4));
+        if (b.length !== 12) return;
+        for (let i = 0; i < 12; i++) r.fr.buf[seq * 12 + i] = b.charCodeAt(i);
+        r.fr.visti[seq] = 1;
+      } catch (e) { /* blocco corrotto: il frame risultera' incompleto */ }
+      return;
+    }
+    const p = t.slice(2).split(',');
+    if (p[0] === 'INI') {
+      grezzi.rx = { attese: +p[1] || 0, byteFrame: +p[2] || 576, nuove: [], sess: null, fr: null, ultimo: Date.now() };
+      grezzi.soglia = +p[3] || 1000;
+      messaggioGrezzi('Scarico in corso…');
+      aggiornaGrezzi();
+    } else if (!grezzi.rx) {
+      return;
+    } else if (p[0] === 'S') {
+      const r = grezzi.rx;
+      r.sess = { id: +p[1], nFrame: +p[2], salto: +p[3], esito: p[4] || '-', byteFrame: r.byteFrame, soglia: grezzi.soglia, frames: [] };
+      r.nuove.push(r.sess);
+      messaggioGrezzi('Scarico registrazione ' + r.nuove.length + ' di ' + r.attese + '…');
+    } else if (p[0] === 'F') {
+      const r = grezzi.rx;
+      r.fr = { i: +p[1], t: +p[2], buf: new Uint8Array(r.byteFrame), visti: new Array(r.byteFrame / 12).fill(0) };
+    } else if (p[0] === 'E') {
+      const r = grezzi.rx;
+      if (!r.fr || !r.sess) return;
+      const completo = r.fr.visti.every(x => x === 1);
+      let somma = 0;
+      for (const b of r.fr.buf) somma += b;
+      const ok = completo && (somma & 0xFFFF) === (+p[2]);
+      const f = ok ? decodificaFrame(r.fr.buf, r.byteFrame) : {};
+      f.i = r.fr.i; f.t = r.fr.t; f.ok = ok;
+      r.sess.frames.push(f);
+      r.fr = null;
+      messaggioGrezzi('Scarico registrazione ' + r.nuove.length + ' di ' + r.attese + ' (frame ' + (f.i + 1) + '/' + r.sess.nFrame + ')…');
+    } else if (p[0] === 'FINE') {
+      chiudiRicezioneGrezzi('Scarico completato:');
+    } else if (p[0] === 'ANN') {
+      chiudiRicezioneGrezzi('Scarico annullato:');
+    }
+  }
+
+  function costruisciCsvGrezzi() {
+    const righe = ['registrazione;salto_vertec;esito;frame;t_ms;zona;riga;colonna;distanza_mm;stato;bersagli;sigma_raw;segnale_raw;riflettanza;valida;entro_soglia'];
+    const ordinate = grezzi.sessioni.slice().sort((a, b) => a.id - b.id);
+    for (const s of ordinate) {
+      for (const f of s.frames) {
+        if (!f.ok) continue;
+        for (let z = 0; z < 64; z++) {
+          const valida = (f.stato[z] === 5 || f.stato[z] === 9) && f.dist[z] > 40;
+          const entro = valida && f.dist[z] < s.soglia;
+          const estra = f.nb.length ? [f.nb[z], f.sigma[z], f.segnale[z], f.rifl[z]] : ['', '', '', ''];
+          righe.push([s.id, s.salto > 0 ? s.salto : '', ESITI[s.esito] !== undefined ? ESITI[s.esito] : s.esito, f.i, f.t, z, z >> 3, z & 7,
+                      f.dist[z], f.stato[z], ...estra, valida ? 1 : 0, entro ? 1 : 0].join(';'));
+        }
+      }
+    }
+    return righe.join('\r\n') + '\r\n';
+  }
+  async function copiaCsvGrezzi() {
+    const csv = costruisciCsvGrezzi();
+    try {
+      await navigator.clipboard.writeText(csv);
+      messaggioGrezzi('Copiato (' + Math.round(csv.length / 1024) + ' KB). Incolla in Excel (cella A1).');
+    } catch (e) {
+      messaggioGrezzi('Appunti non disponibili: usa SCARICA CSV.');
+    }
+  }
+  async function scaricaCsvGrezzi() {
+    const csv = costruisciCsvGrezzi();
+    const nome = 'vertec_grezzi_' + new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '') + '.csv';
+    try {
+      const file = new File([csv], nome, { type: 'text/csv' });
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share({ files: [file], title: nome });
+        messaggioGrezzi('File pronto: ' + nome);
+        return;
+      }
+    } catch (e) { if (e && e.name === 'AbortError') return; }
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+    a.download = nome;
+    document.body.appendChild(a); a.click(); a.remove();
+    messaggioGrezzi('Download avviato: ' + nome);
+  }
+  function richiediScarico(modo) {
+    const n = parseInt(el('grezziN').value, 10);
+    const k = n > 0 ? n : 0;
+    grezzi.rx = { attese: 0, byteFrame: 576, nuove: [], sess: null, fr: null, inAttesa: true, inizio: Date.now(), ultimo: Date.now() };
+    messaggioGrezzi('Richiesta inviata…');
+    aggiornaGrezzi();
+    invia('SCARICA,' + k + ',' + modo);
+  }
+  // Se lo strumento non risponde o smette di inviare, lo scarico viene chiuso con quanto ricevuto
+  setInterval(() => {
+    const r = grezzi.rx;
+    if (!r) return;
+    if (r.inAttesa) {
+      if (Date.now() - r.inizio > 6000) { grezzi.rx = null; messaggioGrezzi('Nessuna risposta dallo strumento.'); aggiornaGrezzi(); }
+    } else if (Date.now() - r.ultimo > 8000) {
+      chiudiRicezioneGrezzi('Scarico interrotto:');
+    }
+  }, 1000);
+
   // Messaggi inviati dall'ESP32 (vedi protocollo nello sketch)
   function onNotifica(ev) {
     const t = dec.decode(ev.target.value).trim();
@@ -326,6 +522,7 @@
     else if (t === 'S:LIVELLA') { impostaLivella(true); }
     else if (t.startsWith('L:')) { gestisciLivella(t); }
     else if (t.startsWith('T:')) { gestisciTraiettoria(t); }
+    else if (t.startsWith('G:') || t.startsWith('D:') || /^d\d\d:/.test(t)) { gestisciGrezzi(t); }
     else if (t.startsWith('X:') || t.startsWith('F:')) { gestisciFit(t); }
     else if (t.startsWith('R:')) {
       const v = t.slice(2);
@@ -413,6 +610,18 @@
   el('bScarica').addEventListener('click', scaricaCsv);
   el('bSvuota').addEventListener('click', () => {
     if (confirm('Cancellare tutte le traiettorie salvate nella pagina?')) { salti.length = 0; aggiornaTraiettorie(); messaggioTraj(''); }
+  });
+
+  el('bGrezziTutto').addEventListener('click', () => richiediScarico(0));
+  el('bGrezziLeggero').addEventListener('click', () => richiediScarico(1));
+  el('bGrezziAnnulla').addEventListener('click', () => invia('ANNULLA'));
+  el('bGrezziCancella').addEventListener('click', () => {
+    if (confirm('Cancellare le registrazioni dalla memoria dello strumento?')) invia('CANCELLA');
+  });
+  el('bGrezziCopia').addEventListener('click', copiaCsvGrezzi);
+  el('bGrezziCsv').addEventListener('click', scaricaCsvGrezzi);
+  el('bGrezziSvuota').addEventListener('click', () => {
+    if (confirm('Cancellare i dati grezzi scaricati sul telefono?')) { grezzi.sessioni.length = 0; aggiornaGrezzi(); messaggioGrezzi(''); }
   });
 
   impostaConnesso(false);
