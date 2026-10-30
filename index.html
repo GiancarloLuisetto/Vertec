@@ -39,6 +39,24 @@
   #bStart { background: var(--green); }
   #bReset { background: var(--red); color: #fff; }
   #bCalibra { background: var(--orange); }
+  #bLivella { background: #22d3ee; }
+  #cardLivella { text-align: center; }
+  #cardLivella[hidden] { display: none; }
+  #livSvg { width: 100%; max-width: 280px; height: auto; display: block; margin: 6px auto 4px; }
+  #livSvg .anello { fill: none; stroke: var(--line); stroke-width: 1.5; }
+  #livSvg .anello.ok { stroke: var(--green); }
+  #livSvg .asse { stroke: var(--line); stroke-width: 1; }
+  #bolla { fill: var(--muted); transition: fill .2s; }
+  #bolla.ok { fill: var(--green); }
+  #bolla.quasi { fill: var(--yellow); }
+  #bolla.ko { fill: var(--red); }
+  #livAngoli { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  #livVerdetto { font-size: 18px; font-weight: 700; margin-top: 2px; color: var(--muted); }
+  #livVerdetto.ok { color: var(--green); }
+  #livVerdetto.quasi { color: var(--yellow); }
+  #livVerdetto.ko { color: var(--red); }
+  #livInfo { color: var(--muted); font-size: 13px; margin-top: 6px; min-height: 1.3em; }
+  #livNota { color: var(--muted); font-size: 12px; margin-top: 10px; line-height: 1.4; }
   h2 { font-size: 12px; color: var(--muted); letter-spacing: .12em; margin: 0 0 8px; font-weight: 600; }
   ol { list-style: none; margin: 0; padding: 0; }
   li { display: flex; justify-content: space-between; padding: 8px 0; border-top: 1px solid var(--line);
@@ -72,7 +90,25 @@
     <button id="bStart" disabled>START</button>
     <button id="bReset" disabled>RESET</button>
     <button id="bCalibra" disabled>CALIBRA</button>
+    <button id="bLivella" disabled>LIVELLA</button>
   </div>
+
+  <section class="card" id="cardLivella" hidden>
+    <h2>LIVELLA DEL SENSORE</h2>
+    <svg id="livSvg" viewBox="0 0 200 200" role="img" aria-label="Bolla della livella">
+      <circle class="anello" cx="100" cy="100" r="90"/>
+      <circle class="anello" cx="100" cy="100" r="54"/>
+      <circle class="anello ok" cx="100" cy="100" r="18"/>
+      <line class="asse" x1="10" y1="100" x2="190" y2="100"/>
+      <line class="asse" x1="100" y1="10" x2="100" y2="190"/>
+      <circle id="bolla" cx="100" cy="100" r="9"/>
+    </svg>
+    <div id="livAngoli">&mdash;</div>
+    <div id="livVerdetto">In attesa…</div>
+    <div id="livInfo"></div>
+    <div id="livNota">La bolla va verso il lato pi&ugrave; alto del sensore: abbassa quel lato (o alza l'opposto) finch&eacute; &egrave; al centro.
+      Cerchi: 1&deg;, 3&deg;, 5&deg;. Le zone che non vedono il pavimento (supporto, pareti, oggetti) vengono escluse da sole.</div>
+  </section>
 
   <section class="card">
     <h2>TRAIETTORIE (PER EXCEL)</h2>
@@ -97,11 +133,12 @@
   const TX_UUID = '6e400003-b5a3-f393-e0a9-e50e24dcca9e'; // ESP32 -> telefono (notifiche)
 
   const el = id => document.getElementById(id);
-  const bConnetti = el('bConnetti'), bStart = el('bStart'), bReset = el('bReset'), bCalibra = el('bCalibra');
+  const bConnetti = el('bConnetti'), bStart = el('bStart'), bReset = el('bReset'), bCalibra = el('bCalibra'), bLivella = el('bLivella');
   const enc = new TextEncoder(), dec = new TextDecoder();
 
   let dispositivo = null, rx = null, tx = null, connesso = false, wakeLock = null;
   let altezzaCm = null;
+  let inLivella = false;
   const storico = [];
 
   // Traiettorie ricevute (restano in memoria finche' la pagina resta aperta)
@@ -124,7 +161,8 @@
     const pill = el('conn');
     pill.textContent = si ? 'Connesso' : 'Non connesso';
     pill.className = 'pill' + (si ? ' on' : '');
-    bStart.disabled = bReset.disabled = bCalibra.disabled = !si;
+    bStart.disabled = bReset.disabled = bCalibra.disabled = bLivella.disabled = !si;
+    if (!si && inLivella) impostaLivella(false);
     bConnetti.hidden = si;
     bConnetti.textContent = dispositivo ? 'RICONNETTI' : 'CONNETTI';
     if (!si) mostraStato('Non connesso');
@@ -140,6 +178,57 @@
 
   function aggiornaInfoAltezza(prefisso) {
     mostraInfo((prefisso ? prefisso + ' ' : '') + (altezzaCm !== null ? 'Altezza sensore: ' + altezzaCm + ' cm' : ''));
+  }
+
+  // --- LIVELLA ---
+  // Messaggi: S:LIVELLA (avviata), L:<X>,<Y>,<scarto mm>,<zone usate> (gradi, + = lato alto del sensore),
+  // L:KO:PIANO (pavimento non trovato), L:KO:SENSORE, L:FINE (chiusa)
+  const LIV_PX_PER_GRADO = 90 / 5, LIV_OK = 1, LIV_QUASI = 3;
+  const gradi = v => (v < 0 ? '\u2212' : '+') + Math.abs(v).toFixed(1) + '\u00b0';
+  function impostaLivella(si) {
+    inLivella = si;
+    el('cardLivella').hidden = !si;
+    bLivella.textContent = si ? 'ESCI DALLA LIVELLA' : 'LIVELLA';
+    bStart.disabled = bCalibra.disabled = si || !connesso;
+    if (si) {
+      mostraStato('Livella attiva', 'calib');
+      mostraInfo('Metti in bolla il sensore');
+      mostraLivella(null);
+    }
+  }
+  function mostraLivella(d, messaggio) {
+    const bolla = el('bolla'), verdetto = el('livVerdetto');
+    if (!d) {
+      bolla.setAttribute('cx', 100); bolla.setAttribute('cy', 100);
+      bolla.setAttribute('class', '');
+      el('livAngoli').textContent = '\u2014';
+      verdetto.textContent = messaggio || 'In attesa\u2026';
+      verdetto.className = messaggio ? 'ko' : '';
+      el('livInfo').textContent = '';
+      return;
+    }
+    let dx = d.x * LIV_PX_PER_GRADO, dy = d.y * LIV_PX_PER_GRADO;
+    const lung = Math.hypot(dx, dy), lim = 80;
+    if (lung > lim) { dx *= lim / lung; dy *= lim / lung; }
+    bolla.setAttribute('cx', (100 + dx).toFixed(1));
+    bolla.setAttribute('cy', (100 + dy).toFixed(1));
+    const tot = Math.hypot(d.x, d.y);
+    const classe = tot < LIV_OK ? 'ok' : (tot < LIV_QUASI ? 'quasi' : 'ko');
+    bolla.setAttribute('class', classe);
+    el('livAngoli').textContent = 'X ' + gradi(d.x) + '   Y ' + gradi(d.y);
+    verdetto.textContent = classe === 'ok' ? 'IN BOLLA' : (classe === 'quasi' ? 'QUASI' : 'INCLINATO');
+    verdetto.className = classe;
+    el('livInfo').textContent = 'Totale ' + tot.toFixed(1) + '\u00b0 \u00b7 zone sul pavimento ' + d.zone + '/64 \u00b7 scarto ' + d.rms + ' mm';
+  }
+  function gestisciLivella(t) {
+    if (t === 'L:FINE') { impostaLivella(false); return; }
+    if (!inLivella) impostaLivella(true);   // aggiornamenti arrivati senza S:LIVELLA (es. connessione a livella gia' aperta)
+    if (t === 'L:KO:PIANO') { mostraLivella(null, 'PAVIMENTO NON TROVATO'); el('livInfo').textContent = 'Libera la vista del pavimento o riduci gli ostacoli'; return; }
+    if (t === 'L:KO:SENSORE') { mostraLivella(null, 'SENSORE NON RISPONDE'); return; }
+    const p = t.slice(2).split(',');
+    const x = parseFloat(p[0]), y = parseFloat(p[1]);
+    if (isNaN(x) || isNaN(y)) return;
+    mostraLivella({ x, y, rms: p[2], zone: p[3] });
   }
 
   // --- TRAIETTORIE E CSV ---
@@ -229,10 +318,13 @@
   // Messaggi inviati dall'ESP32 (vedi protocollo nello sketch)
   function onNotifica(ev) {
     const t = dec.decode(ev.target.value).trim();
+    if (inLivella && t.startsWith('S:') && t !== 'S:LIVELLA') impostaLivella(false);   // uno stato normale: la livella e' chiusa
     if (t === 'S:PRONTO')       { mostraStato('Pronto', 'pronto'); aggiornaInfoAltezza(); }
     else if (t === 'S:PAUSA')   { mostraStato('In pausa', 'pausa'); aggiornaInfoAltezza(); }
     else if (t === 'S:CALIB')   { mostraStato('Calibrazione in corso…', 'calib'); mostraInfo('Tieni libera l\'area sotto il sensore'); }
     else if (t === 'S:ATTESA')  { mostraStato('In attesa di calibrazione', 'calib'); mostraInfo('Premi CALIBRA'); }
+    else if (t === 'S:LIVELLA') { impostaLivella(true); }
+    else if (t.startsWith('L:')) { gestisciLivella(t); }
     else if (t.startsWith('T:')) { gestisciTraiettoria(t); }
     else if (t.startsWith('X:') || t.startsWith('F:')) { gestisciFit(t); }
     else if (t.startsWith('R:')) {
@@ -316,6 +408,7 @@
   bStart.addEventListener('click', () => invia('START'));
   bReset.addEventListener('click', () => invia('RESET'));
   bCalibra.addEventListener('click', () => invia('CALIBRA'));
+  bLivella.addEventListener('click', () => invia(inLivella ? 'ESCI' : 'LIVELLA'));
   el('bCopia').addEventListener('click', copiaCsv);
   el('bScarica').addEventListener('click', scaricaCsv);
   el('bSvuota').addEventListener('click', () => {
