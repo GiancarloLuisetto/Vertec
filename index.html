@@ -81,6 +81,7 @@
 <body>
   <header>
     <h1>ARCUS VERTEC</h1>
+    <span id="versione" style="font-size:11px;color:var(--muted,#8a8f98)"></span>
     <span id="conn" class="pill">Non connesso</span>
   </header>
 
@@ -142,7 +143,7 @@
       <button id="bGrezziSvuota" class="sec" disabled>Svuota dati sul telefono</button>
     </div>
     <div id="grezziProg"></div>
-    <div id="grezziNota">Ogni salto (e ogni passaggio di una mano) viene registrato con tutte le 64 zone di tutti i frame, anche quelli in cui la mano non &egrave; stata letta.
+    <div id="grezziNota">Ogni salto (e ogni passaggio di una mano) viene registrato con tutte le zone (16 in 4x4, 64 in 8x8) di tutti i frame, anche quelli in cui la mano non &egrave; stata letta.
       Le registrazioni restano nella memoria dello strumento fino allo spegnimento. Durante lo scarico la misura &egrave; ferma.</div>
   </section>
 
@@ -168,6 +169,7 @@
   const storico = [];
 
   // Traiettorie ricevute (restano in memoria finche' la pagina resta aperta)
+  const PAGINA_VER = '0.14';
   const salti = [];          // { n, ora, esito, H, righe: [{i, t, y, zona}], completo }
   let traiettoria = null;    // traiettoria in corso di ricezione
   let contatoreSalti = 0;
@@ -368,14 +370,15 @@
   function decodificaFrame(buf, byteFrame) {
     const v = new DataView(buf.buffer);
     const f = { dist: [], stato: [], nb: [], rifl: [], sigma: [], segnale: [] };
-    for (let z = 0; z < 64; z++) {
+    const nz = (byteFrame === 48 || byteFrame === 144) ? 16 : 64;   // zone per frame: 4x4 o 8x8
+    for (let z = 0; z < nz; z++) {
       f.dist.push(v.getInt16(2 * z, true));
-      f.stato.push(buf[128 + z]);
-      if (byteFrame > 192) {
-        f.nb.push(buf[192 + z]);
-        f.rifl.push(buf[256 + z]);
-        f.sigma.push(v.getUint16(320 + 2 * z, true));
-        f.segnale.push(v.getUint16(448 + 2 * z, true));
+      f.stato.push(buf[2 * nz + z]);
+      if (byteFrame > 3 * nz) {
+        f.nb.push(buf[3 * nz + z]);
+        f.rifl.push(buf[4 * nz + z]);
+        f.sigma.push(v.getUint16(5 * nz + 2 * z, true));
+        f.segnale.push(v.getUint16(7 * nz + 2 * z, true));
       }
     }
     return f;
@@ -460,11 +463,12 @@
     for (const s of ordinate) {
       for (const f of s.frames) {
         if (!f.ok) continue;
-        for (let z = 0; z < 64; z++) {
+        const nz = f.dist.length, lato = Math.round(Math.sqrt(nz));
+        for (let z = 0; z < nz; z++) {
           const valida = (f.stato[z] === 5 || f.stato[z] === 9) && f.dist[z] > 40;
           const entro = valida && f.dist[z] < s.soglia;
           const estra = f.nb.length ? [f.nb[z], f.sigma[z], f.segnale[z], f.rifl[z]] : ['', '', '', ''];
-          righe.push([s.id, s.salto > 0 ? s.salto : '', ESITI[s.esito] !== undefined ? ESITI[s.esito] : s.esito, f.i, f.t, f.lett, z, z >> 3, z & 7,
+          righe.push([s.id, s.salto > 0 ? s.salto : '', ESITI[s.esito] !== undefined ? ESITI[s.esito] : s.esito, f.i, f.t, f.lett, z, Math.floor(z / lato), z % lato,
                       f.dist[z], f.stato[z], ...estra, valida ? 1 : 0, entro ? 1 : 0].join(';'));
         }
       }
@@ -542,6 +546,7 @@
       aggiungiStorico(v);
     }
     else if (t.startsWith('H:')) { altezzaCm = t.slice(2); aggiornaInfoAltezza(); }
+    else if (t.startsWith('V:')) { el('versione').textContent = 'strumento ' + t.slice(2).replace(',', ' \u00b7 ') + ' \u00b7 pagina ' + PAGINA_VER; }
     else if (t === 'C:OK')       { mostraInfo('Taratura riuscita'); }
     else if (t.startsWith('C:KO:')) {
       const motivi = { LETTURE: 'letture insufficienti', RANGE: 'altezza fuori range', INSTABILE: 'letture instabili, area libera?' };
