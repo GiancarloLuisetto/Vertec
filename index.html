@@ -164,6 +164,7 @@
   let dispositivo = null, rx = null, tx = null, connesso = false, wakeLock = null;
   let altezzaCm = null;
   let inLivella = false;
+  let registrando = false;   // test pendolo: registrazione in corso
   const storico = [];
 
   // Traiettorie ricevute (restano in memoria finche' la pagina resta aperta)
@@ -348,7 +349,7 @@
   //   D:INI,<registrazioni>,<byte per frame>,<soglia mm> | D:S,<id>,<n frame>,<salto Vertec>,<esito>
   //   D:F,<frame>,<t_ms> | d<seq>:<12 byte in base64> | D:E,<frame>,<somma> | D:FINE | D:ANN
   const grezzi = { sulDisp: null, sessioni: [], rx: null, soglia: 1000 };
-  const ESITI = { O: 'OK', S: 'SCARTO', B: 'BREVE', E: 'ERR', '-': '' };
+  const ESITI = { O: 'OK', S: 'SCARTO', B: 'BREVE', E: 'ERR', P: 'PENDOLO', '-': '' };
 
   function messaggioGrezzi(t) { el('grezziProg').textContent = t || ''; }
   function aggiornaGrezzi() {
@@ -520,7 +521,12 @@
     const t = dec.decode(ev.target.value).trim();
     if (inLivella && t.startsWith('S:') && t !== 'S:LIVELLA') impostaLivella(false);   // uno stato normale: la livella e' chiusa
     if (t === 'S:PRONTO')       { mostraStato('Pronto', 'pronto'); aggiornaInfoAltezza(); }
-    else if (t === 'S:PAUSA')   { mostraStato('In pausa', 'pausa'); aggiornaInfoAltezza(); }
+    else if (t === 'S:REG')     { registrando = true; mostraStato('Registrazione in corso…', 'calib'); mostraInfo('Muovi il pendolo sopra il sensore'); }
+    else if (t === 'S:PAUSA')   {
+      mostraStato('In pausa', 'pausa');
+      if (registrando) { registrando = false; mostraInfo('Registrazione completata: premi SCARICA DAL DISPOSITIVO'); }
+      else aggiornaInfoAltezza();
+    }
     else if (t === 'S:CALIB')   { mostraStato('Calibrazione in corso…', 'calib'); mostraInfo('Tieni libera l\'area sotto il sensore'); }
     else if (t === 'S:ATTESA')  { mostraStato('In attesa di calibrazione', 'calib'); mostraInfo('Premi CALIBRA'); }
     else if (t === 'S:LIVELLA') { impostaLivella(true); }
